@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="zh-TW">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>FFXIV 模組轉換器</title>
+        <!-- 載入 JSZip 函式庫以處理 pmp (zip) 檔案 -->
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+        <style>
+            body {
+                font-family:
+                    system-ui,
+                    -apple-system,
+                    sans-serif;
+                max-width: 600px;
+                margin: 40px auto;
+                padding: 20px;
+                background-color: #f5f5f5;
+                color: #333;
+                line-height: 1.6;
+            }
+            .container {
+                background-color: #ffffff;
+                padding: 30px;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            }
+            h1 {
+                font-size: 1.5rem;
+                margin-bottom: 20px;
+                color: #222;
+            }
+            .form-group {
+                margin-bottom: 15px;
+            }
+            label {
+                display: block;
+                margin-bottom: 5px;
+                font-weight: bold;
+            }
+            input[type="file"],
+            input[type="number"] {
+                width: 100%;
+                padding: 10px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                box-sizing: border-box;
+            }
+            button {
+                background-color: #0066cc;
+                color: #ffffff;
+                border: none;
+                padding: 12px 20px;
+                cursor: pointer;
+                border-radius: 4px;
+                font-size: 1rem;
+                width: 100%;
+                margin-top: 10px;
+            }
+            button:hover {
+                background-color: #0052a3;
+            }
+            button:disabled {
+                background-color: #cccccc;
+                cursor: not-allowed;
+            }
+            #log-container {
+                margin-top: 20px;
+                background-color: #1e1e1e;
+                padding: 15px;
+                border-radius: 4px;
+                display: none;
+            }
+            #log {
+                color: #4af626;
+                font-family: monospace;
+                font-size: 0.9rem;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+                max-height: 300px;
+                overflow-y: auto;
+                margin: 0;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>FFXIV 模組轉換器</h1>
+            <div class="form-group">
+                <label for="fileInput">選擇模組檔案 (.pmp)</label>
+                <input type="file" id="fileInput" accept=".pmp,.zip" />
+            </div>
+            <div class="form-group">
+                <label for="targetIdInput">目標 ID (數字)</label>
+                <input
+                    type="number"
+                    id="targetIdInput"
+                    min="1"
+                    max="9999"
+                    placeholder="例如: 835"
+                />
+            </div>
+            <button id="convertBtn">開始轉換</button>
+
+            <div id="log-container">
+                <pre id="log"></pre>
+            </div>
+        </div>
+
+        <script>
+            const fileInput = document.getElementById("fileInput");
+            const targetIdInput = document.getElementById("targetIdInput");
+            const convertBtn = document.getElementById("convertBtn");
+            const logContainer = document.getElementById("log-container");
+            const logElement = document.getElementById("log");
+
+            function log(message) {
+                logContainer.style.display = "block";
+                logElement.textContent += message + "\n";
+                logElement.scrollTop = logElement.scrollHeight;
+            }
+
+            function clearLog() {
+                logElement.textContent = "";
+                logContainer.style.display = "none";
+            }
+
+            // 替換位元組陣列中的特定序列
+            function replaceBytes(data, searchBytes, replaceBytesTarget) {
+                let result = new Uint8Array(data.length);
+                result.set(data);
+                let searchLen = searchBytes.length;
+
+                for (let i = 0; i <= result.length - searchLen; i++) {
+                    let match = true;
+                    for (let j = 0; j < searchLen; j++) {
+                        if (result[i + j] !== searchBytes[j]) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match) {
+                        result.set(replaceBytesTarget, i);
+                        i += searchLen - 1; // 跳過已替換的部分
+                    }
+                }
+                return result;
+            }
+
+            convertBtn.addEventListener("click", async () => {
+                const file = fileInput.files[0];
+                const targetIdVal = targetIdInput.value;
+
+                if (!file) {
+                    alert("請選擇檔案");
+                    return;
+                }
+                if (!targetIdVal) {
+                    alert("請輸入目標 ID");
+                    return;
+                }
+
+                const targetIdInt = parseInt(targetIdVal, 10);
+                const targetIdStr = `e${String(targetIdInt).padStart(4, "0")}`;
+
+                convertBtn.disabled = true;
+                clearLog();
+
+                try {
+                    log(`[*] 讀取檔案: ${file.name}...`);
+                    const zip = await JSZip.loadAsync(file);
+                    const jsonFiles = Object.keys(zip.files).filter((name) =>
+                        name.endsWith(".json"),
+                    );
+
+                    // 1. 自動偵測原始 ID
+                    const idCounts = {};
+                    const regex = /e(\d{4})/g;
+
+                    for (const jsonName of jsonFiles) {
+                        const content =
+                            await zip.files[jsonName].async("string");
+                        let match;
+                        while ((match = regex.exec(content)) !== null) {
+                            const id = match[1];
+                            if (id !== "0000") {
+                                idCounts[id] = (idCounts[id] || 0) + 1;
+                            }
+                        }
+                    }
+
+                    let origIdIntStr = null;
+                    let maxCount = 0;
+                    for (const id in idCounts) {
+                        if (idCounts[id] > maxCount) {
+                            maxCount = idCounts[id];
+                            origIdIntStr = id;
+                        }
+                    }
+
+                    if (!origIdIntStr) {
+                        log(`[-] 錯誤：無法自動偵測到原始裝備 ID。`);
+                        convertBtn.disabled = false;
+                        return;
+                    }
+
+                    const origIdInt = parseInt(origIdIntStr, 10);
+                    const origIdStr = `e${origIdIntStr}`;
+
+                    log(
+                        `[*] 偵測到原始 ID: ${origIdStr} (SetId: ${origIdInt})`,
+                    );
+                    log(
+                        `[*] 將轉換為目標 ID: ${targetIdStr} (SetId: ${targetIdInt})`,
+                    );
+
+                    // 準備轉換規則
+                    const encoder = new TextEncoder();
+                    const origIdBytes = encoder.encode(origIdStr);
+                    const targetIdBytes = encoder.encode(targetIdStr);
+
+                    const newZip = new JSZip();
+                    const fileNames = Object.keys(zip.files);
+
+                    log(`[*] 處理並替換檔案內容與檔名...`);
+                    for (const path of fileNames) {
+                        const fileObj = zip.files[path];
+                        if (fileObj.dir) continue; // 跳過資料夾，僅建立檔案時 JSZip 會自動處理路徑
+
+                        // 替換檔名與資料夾路徑中的原始 ID
+                        const newPath = path.split(origIdStr).join(targetIdStr);
+
+                        if (path.endsWith(".json")) {
+                            let content = await fileObj.async("string");
+                            // 替換 JSON 內的數值與字串
+                            content = content.replace(
+                                new RegExp(`"SetId"\\s*:\\s*${origIdInt}`, "g"),
+                                `"SetId": ${targetIdInt}`,
+                            );
+                            content = content.replace(
+                                new RegExp(
+                                    `"PrimaryId"\\s*:\\s*${origIdInt}`,
+                                    "g",
+                                ),
+                                `"PrimaryId": ${targetIdInt}`,
+                            );
+                            content = content
+                                .split(origIdStr)
+                                .join(targetIdStr);
+                            newZip.file(newPath, content);
+                        } else {
+                            let data = await fileObj.async("uint8array");
+                            // 檢查二進位檔案是否包含原始 ID 並替換
+                            let contains = false;
+                            for (
+                                let i = 0;
+                                i <= data.length - origIdBytes.length;
+                                i++
+                            ) {
+                                let match = true;
+                                for (let j = 0; j < origIdBytes.length; j++) {
+                                    if (data[i + j] !== origIdBytes[j]) {
+                                        match = false;
+                                        break;
+                                    }
+                                }
+                                if (match) {
+                                    contains = true;
+                                    break;
+                                }
+                            }
+
+                            if (contains) {
+                                data = replaceBytes(
+                                    data,
+                                    origIdBytes,
+                                    targetIdBytes,
+                                );
+                            }
+                            newZip.file(newPath, data);
+                        }
+                    }
+
+                    log(`[*] 重新打包為 PMP 檔案，請稍候...`);
+                    const generatedContent = await newZip.generateAsync({
+                        type: "blob",
+                        compression: "DEFLATE",
+                        compressionOptions: {
+                            level: 6,
+                        },
+                    });
+
+                    // 下載檔案
+                    const baseName =
+                        file.name.substring(0, file.name.lastIndexOf(".")) ||
+                        file.name;
+                    const outFileName = `${baseName}_${targetIdStr}.pmp`;
+
+                    const downloadUrl = URL.createObjectURL(generatedContent);
+                    const a = document.createElement("a");
+                    a.href = downloadUrl;
+                    a.download = outFileName;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(downloadUrl);
+
+                    log(`[+] 轉換完成！已觸發下載。`);
+                } catch (error) {
+                    log(`[-] 發生錯誤: ${error.message}`);
+                    console.error(error);
+                } finally {
+                    convertBtn.disabled = false;
+                }
+            });
+        </script>
+    </body>
+</html>
