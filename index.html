@@ -8,11 +8,8 @@
         <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
         <style>
             body {
-                font-family:
-                    system-ui,
-                    -apple-system,
-                    sans-serif;
-                max-width: 600px;
+                font-family: system-ui, -apple-system, sans-serif;
+                max-width: 650px;
                 margin: 40px auto;
                 padding: 20px;
                 background-color: #f5f5f5;
@@ -56,13 +53,48 @@
                 font-size: 1rem;
                 width: 100%;
                 margin-top: 10px;
+                transition: background-color 0.2s;
             }
-            button:hover {
+            button:hover:not(:disabled) {
                 background-color: #0052a3;
             }
             button:disabled {
                 background-color: #cccccc;
                 cursor: not-allowed;
+            }
+            .mapping-item {
+                display: flex;
+                align-items: center;
+                margin-bottom: 10px;
+                background: #f9f9f9;
+                padding: 10px;
+                border-radius: 4px;
+                border: 1px solid #eee;
+            }
+            .mapping-item span.orig-id {
+                width: 140px;
+                font-weight: bold;
+            }
+            .mapping-item span.arrow {
+                margin: 0 15px;
+                color: #888;
+            }
+            .mapping-input-group {
+                display: flex;
+                align-items: center;
+                flex: 1;
+            }
+            .mapping-input-group span.prefix {
+                background: #e0e0e0;
+                padding: 9px 12px;
+                border: 1px solid #ccc;
+                border-right: none;
+                border-radius: 4px 0 0 4px;
+                font-weight: bold;
+            }
+            .mapping-input-group input {
+                border-radius: 0 4px 4px 0;
+                margin: 0;
             }
             #log-container {
                 margin-top: 20px;
@@ -81,26 +113,37 @@
                 overflow-y: auto;
                 margin: 0;
             }
+            .notice {
+                background-color: #fff3cd;
+                color: #856404;
+                padding: 15px;
+                border-radius: 4px;
+                margin-bottom: 20px;
+                font-size: 0.95rem;
+                border-left: 4px solid #ffeeba;
+            }
         </style>
     </head>
     <body>
         <div class="container">
             <h1>FFXIV 模組轉換器</h1>
-            <div class="form-group">
-                <label for="fileInput">選擇模組檔案 (.pmp)</label>
+            
+            <div class="notice">
+                <strong>注意事項：</strong>本工具僅支援裝備(e)、飾品(a)、武器(w)、頭髮(h) 等 ID 的轉換。
+            </div>
+
+            <div class="form-group" id="analyze-section">
+                <label for="fileInput">1. 選擇模組檔案 (.pmp)</label>
                 <input type="file" id="fileInput" accept=".pmp,.zip" />
+                <button id="analyzeBtn">分析檔案內容</button>
             </div>
-            <div class="form-group">
-                <label for="targetIdInput">目標 ID (數字)</label>
-                <input
-                    type="number"
-                    id="targetIdInput"
-                    min="1"
-                    max="9999"
-                    placeholder="例如: 835"
-                />
+
+            <div id="mapping-section" style="display: none; margin-top: 30px; border-top: 1px solid #eee; padding-top: 20px;">
+                <label>2. 設定 ID 對應轉換</label>
+                <p style="font-size: 0.9em; color: #666; margin-top: 0;">以下為檔案內偵測到的模型 ID。請輸入欲替換的新 ID（若留空，則該 ID 會保持原樣不轉換）。</p>
+                <div id="mappingList"></div>
+                <button id="convertBtn">開始轉換打包</button>
             </div>
-            <button id="convertBtn">開始轉換</button>
 
             <div id="log-container">
                 <pre id="log"></pre>
@@ -109,10 +152,16 @@
 
         <script>
             const fileInput = document.getElementById("fileInput");
-            const targetIdInput = document.getElementById("targetIdInput");
+            const analyzeBtn = document.getElementById("analyzeBtn");
             const convertBtn = document.getElementById("convertBtn");
             const logContainer = document.getElementById("log-container");
             const logElement = document.getElementById("log");
+            const mappingSection = document.getElementById("mapping-section");
+            const mappingList = document.getElementById("mappingList");
+
+            let currentZip = null;
+            let detectedIds = new Set();
+            let currentFile = null;
 
             function log(message) {
                 logContainer.style.display = "block";
@@ -147,135 +196,186 @@
                 return result;
             }
 
-            convertBtn.addEventListener("click", async () => {
-                const file = fileInput.files[0];
-                const targetIdVal = targetIdInput.value;
-
-                if (!file) {
-                    alert("請選擇檔案");
-                    return;
-                }
-                if (!targetIdVal) {
-                    alert("請輸入目標 ID");
-                    return;
-                }
-
-                const targetIdInt = parseInt(targetIdVal, 10);
-                const targetIdStr = `e${String(targetIdInt).padStart(4, "0")}`;
-
-                convertBtn.disabled = true;
+            // 使用者更換檔案時，重置介面
+            fileInput.addEventListener("change", () => {
+                mappingSection.style.display = "none";
                 clearLog();
+            });
+
+            // 第 1 步：分析壓縮檔內容
+            analyzeBtn.addEventListener("click", async () => {
+                currentFile = fileInput.files[0];
+                if (!currentFile) {
+                    alert("請先選擇檔案");
+                    return;
+                }
+
+                analyzeBtn.disabled = true;
+                mappingSection.style.display = "none";
+                clearLog();
+                log(`[*] 正在分析檔案: ${currentFile.name}...`);
 
                 try {
-                    log(`[*] 讀取檔案: ${file.name}...`);
-                    const zip = await JSZip.loadAsync(file);
-                    const jsonFiles = Object.keys(zip.files).filter((name) =>
-                        name.endsWith(".json"),
-                    );
+                    currentZip = await JSZip.loadAsync(currentFile);
+                    detectedIds.clear();
 
-                    // 1. 自動偵測原始 ID
-                    const idCounts = {};
-                    const regex = /e(\d{4})/g;
+                    // 擷取 e, a, w, h 開頭加上 4 位數字的 ID
+                    const regex = /([eawh])(\d{4})/g;
+                    const fileNames = Object.keys(currentZip.files);
 
-                    for (const jsonName of jsonFiles) {
-                        const content =
-                            await zip.files[jsonName].async("string");
+                    // 掃描檔名與 JSON 內容
+                    for (const path of fileNames) {
                         let match;
-                        while ((match = regex.exec(content)) !== null) {
-                            const id = match[1];
-                            if (id !== "0000") {
-                                idCounts[id] = (idCounts[id] || 0) + 1;
+                        while ((match = regex.exec(path)) !== null) {
+                            if (match[2] !== "0000") detectedIds.add(match[0]);
+                        }
+
+                        if (path.endsWith(".json")) {
+                            const content = await currentZip.files[path].async("string");
+                            while ((match = regex.exec(content)) !== null) {
+                                if (match[2] !== "0000") detectedIds.add(match[0]);
                             }
                         }
                     }
 
-                    let origIdIntStr = null;
-                    let maxCount = 0;
-                    for (const id in idCounts) {
-                        if (idCounts[id] > maxCount) {
-                            maxCount = idCounts[id];
-                            origIdIntStr = id;
-                        }
-                    }
-
-                    if (!origIdIntStr) {
-                        log(`[-] 錯誤：無法自動偵測到原始裝備 ID。`);
-                        convertBtn.disabled = false;
+                    if (detectedIds.size === 0) {
+                        log(`[-] 分析完成：未在檔案中偵測到任何有效的裝備/飾品 ID。`);
                         return;
                     }
 
-                    const origIdInt = parseInt(origIdIntStr, 10);
-                    const origIdStr = `e${origIdIntStr}`;
+                    log(`[+] 分析完成：共偵測到 ${detectedIds.size} 種不同的模型 ID。`);
+                    renderMappingUI();
+                } catch (error) {
+                    log(`[-] 發生錯誤: ${error.message}`);
+                    console.error(error);
+                } finally {
+                    analyzeBtn.disabled = false;
+                }
+            });
 
-                    log(
-                        `[*] 偵測到原始 ID: ${origIdStr} (SetId: ${origIdInt})`,
-                    );
-                    log(
-                        `[*] 將轉換為目標 ID: ${targetIdStr} (SetId: ${targetIdInt})`,
-                    );
+            // 渲染 ID 對應設定介面
+            function renderMappingUI() {
+                mappingList.innerHTML = "";
+                
+                // 排序讓顯示順序固定
+                const sortedIds = Array.from(detectedIds).sort();
 
-                    // 準備轉換規則
-                    const encoder = new TextEncoder();
-                    const origIdBytes = encoder.encode(origIdStr);
-                    const targetIdBytes = encoder.encode(targetIdStr);
+                sortedIds.forEach(idStr => {
+                    const prefix = idStr.charAt(0);
+                    const num = parseInt(idStr.substring(1), 10);
+                    
+                    const itemDiv = document.createElement("div");
+                    itemDiv.className = "mapping-item";
+                    
+                    itemDiv.innerHTML = `
+                        <span class="orig-id">${idStr} (SetId: ${num})</span>
+                        <span class="arrow">➝</span>
+                        <div class="mapping-input-group">
+                            <span class="prefix">${prefix}</span>
+                            <input type="number" class="target-id-input" 
+                                data-orig="${idStr}" data-prefix="${prefix}" 
+                                min="1" max="9999" placeholder="新 ID (如 835)" />
+                        </div>
+                    `;
+                    mappingList.appendChild(itemDiv);
+                });
+                
+                mappingSection.style.display = "block";
+            }
 
+            // 第 2 步：套用轉換並打包
+            convertBtn.addEventListener("click", async () => {
+                const inputs = document.querySelectorAll(".target-id-input");
+                const mappings = [];
+
+                inputs.forEach(input => {
+                    if (input.value && input.value.trim() !== "") {
+                        const origStr = input.getAttribute("data-orig");
+                        const prefix = input.getAttribute("data-prefix");
+                        const targetInt = parseInt(input.value, 10);
+                        const origInt = parseInt(origStr.substring(1), 10);
+                        const targetStr = `${prefix}${String(targetInt).padStart(4, "0")}`;
+                        
+                        // 只加入確有變動的 ID
+                        if (origStr !== targetStr) {
+                            mappings.push({ origStr, origInt, targetStr, targetInt });
+                        }
+                    }
+                });
+
+                if (mappings.length === 0) {
+                    alert("請至少設定一個新的 ID！(若輸入的 ID 與原本相同，或全部留空則不會轉換)");
+                    return;
+                }
+
+                convertBtn.disabled = true;
+                log(`\n[*] 開始準備轉換處理...`);
+
+                try {
                     const newZip = new JSZip();
-                    const fileNames = Object.keys(zip.files);
+                    const encoder = new TextEncoder();
+                    
+                    // 預先產生 byte 陣列加速處理
+                    const compiledMappings = mappings.map(m => {
+                        log(`[*] 將轉換 ${m.origStr} ➝ ${m.targetStr}`);
+                        return {
+                            ...m,
+                            origBytes: encoder.encode(m.origStr),
+                            targetBytes: encoder.encode(m.targetStr)
+                        };
+                    });
 
                     log(`[*] 處理並替換檔案內容與檔名...`);
-                    for (const path of fileNames) {
-                        const fileObj = zip.files[path];
-                        if (fileObj.dir) continue; // 跳過資料夾，僅建立檔案時 JSZip 會自動處理路徑
+                    const fileNames = Object.keys(currentZip.files);
 
-                        // 替換檔名與資料夾路徑中的原始 ID
-                        const newPath = path.split(origIdStr).join(targetIdStr);
+                    for (const path of fileNames) {
+                        const fileObj = currentZip.files[path];
+                        if (fileObj.dir) continue; // 跳過資料夾
+
+                        // 替換檔名中的所有相符 ID
+                        let newPath = path;
+                        for (const m of compiledMappings) {
+                            newPath = newPath.split(m.origStr).join(m.targetStr);
+                        }
 
                         if (path.endsWith(".json")) {
                             let content = await fileObj.async("string");
-                            // 替換 JSON 內的數值與字串
-                            content = content.replace(
-                                new RegExp(`"SetId"\\s*:\\s*${origIdInt}`, "g"),
-                                `"SetId": ${targetIdInt}`,
-                            );
-                            content = content.replace(
-                                new RegExp(
-                                    `"PrimaryId"\\s*:\\s*${origIdInt}`,
-                                    "g",
-                                ),
-                                `"PrimaryId": ${targetIdInt}`,
-                            );
-                            content = content
-                                .split(origIdStr)
-                                .join(targetIdStr);
+                            for (const m of compiledMappings) {
+                                // 使用 \\b 確保只匹配完整數字 (避免把 ID 1 的替換套用到 ID 15 上)
+                                content = content.replace(
+                                    new RegExp(`"SetId"\\s*:\\s*${m.origInt}\\b`, "g"),
+                                    `"SetId": ${m.targetInt}`
+                                );
+                                content = content.replace(
+                                    new RegExp(`"PrimaryId"\\s*:\\s*${m.origInt}\\b`, "g"),
+                                    `"PrimaryId": ${m.targetInt}`
+                                );
+                                // 替換 JSON 內所有的 ID 字串
+                                content = content.split(m.origStr).join(m.targetStr);
+                            }
                             newZip.file(newPath, content);
                         } else {
                             let data = await fileObj.async("uint8array");
-                            // 檢查二進位檔案是否包含原始 ID 並替換
-                            let contains = false;
-                            for (
-                                let i = 0;
-                                i <= data.length - origIdBytes.length;
-                                i++
-                            ) {
-                                let match = true;
-                                for (let j = 0; j < origIdBytes.length; j++) {
-                                    if (data[i + j] !== origIdBytes[j]) {
-                                        match = false;
+                            // 循序檢查並替換每一個對應的 binary
+                            for (const m of compiledMappings) {
+                                let contains = false;
+                                for (let i = 0; i <= data.length - m.origBytes.length; i++) {
+                                    let match = true;
+                                    for (let j = 0; j < m.origBytes.length; j++) {
+                                        if (data[i + j] !== m.origBytes[j]) {
+                                            match = false;
+                                            break;
+                                        }
+                                    }
+                                    if (match) {
+                                        contains = true;
                                         break;
                                     }
                                 }
-                                if (match) {
-                                    contains = true;
-                                    break;
-                                }
-                            }
 
-                            if (contains) {
-                                data = replaceBytes(
-                                    data,
-                                    origIdBytes,
-                                    targetIdBytes,
-                                );
+                                if (contains) {
+                                    data = replaceBytes(data, m.origBytes, m.targetBytes);
+                                }
                             }
                             newZip.file(newPath, data);
                         }
@@ -290,11 +390,9 @@
                         },
                     });
 
-                    // 下載檔案
-                    const baseName =
-                        file.name.substring(0, file.name.lastIndexOf(".")) ||
-                        file.name;
-                    const outFileName = `${baseName}_${targetIdStr}.pmp`;
+                    // 觸發下載
+                    const baseName = currentFile.name.substring(0, currentFile.name.lastIndexOf(".")) || currentFile.name;
+                    const outFileName = `${baseName}_converted.pmp`;
 
                     const downloadUrl = URL.createObjectURL(generatedContent);
                     const a = document.createElement("a");
@@ -305,9 +403,9 @@
                     document.body.removeChild(a);
                     URL.revokeObjectURL(downloadUrl);
 
-                    log(`[+] 轉換完成！已觸發下載。`);
+                    log(`[+] 轉換完成！已觸發下載: ${outFileName}`);
                 } catch (error) {
-                    log(`[-] 發生錯誤: ${error.message}`);
+                    log(`[-] 轉換過程發生錯誤: ${error.message}`);
                     console.error(error);
                 } finally {
                     convertBtn.disabled = false;
